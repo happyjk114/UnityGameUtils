@@ -1,3 +1,4 @@
+using UnityEngine;
 public class RequiredFieldIndicatorAttribute : PropertyAttribute
 {
     // 현재는 속성 자체에 추가 데이터가 필요 없지만,
