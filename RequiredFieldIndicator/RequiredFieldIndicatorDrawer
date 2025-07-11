@@ -1,0 +1,134 @@
+using UnityEngine;
+using UnityEditor; // Editor GUI 관련 클래스 사용
+
+/// <summary>
+/// RequiredFieldIndicatorAttribute가 붙은 프로퍼티를 위한 커스텀 Drawer입니다.
+/// 필드가 유효하지 않을 경우 왼쪽에 붉은 점을 표시합니다.
+/// </summary>
+[CustomPropertyDrawer(typeof(RequiredFieldIndicatorAttribute))]
+public class RequiredFieldIndicatorDrawer : PropertyDrawer
+{
+    private const float indicatorWidth = 6f; // 표시기(점) 너비
+    private const float spacing = 2f;       // 표시기와 필드 사이 간격
+
+    public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+    {
+        // 필수 필드 유효성 검사
+        bool isInvalid = IsFieldInvalid(property);
+
+        // Indent 레벨 저장 및 초기화 (점이 들여쓰기 안되게)
+        int originalIndent = EditorGUI.indentLevel;
+        EditorGUI.indentLevel = 0;
+
+        // 1. 표시기 그릴 영역 계산 (맨 왼쪽에 작은 사각형 영역)
+        Rect indicatorRect = new Rect(
+            position.x + (originalIndent * 15f), // 현재 Indent 고려하여 X 위치 조정
+            position.y,
+            indicatorWidth,
+            position.height);
+
+        // 2. 실제 프로퍼티 필드가 그려질 영역 계산 (표시기 너비 + 간격만큼 오른쪽으로 이동 및 너비 축소)
+        Rect propertyRect = new Rect(
+            indicatorRect.xMax + spacing,
+            position.y,
+            position.width - indicatorRect.width - spacing - (originalIndent * 15f),
+            position.height);
+
+        // 3. 필드가 유효하지 않으면 표시기 그리기
+        if (isInvalid)
+        {
+            Color originalColor = GUI.color;
+            GUI.color = Color.red; // 붉은색 설정
+
+            // 작은 사각형(점처럼 보임) 또는 원 그리기
+            // EditorGUI.DrawRect(indicatorRect, Color.red); // 사각형
+            Rect dotRect = indicatorRect;
+            dotRect.width = 5; // 너비 조절
+            dotRect.height = 5; // 높이 조절
+            dotRect.y += (position.height - dotRect.height) / 2; // 수직 중앙 정렬
+            dotRect.x += (indicatorWidth - dotRect.width) / 2; // 수평 중앙 정렬 (선택적)
+            EditorGUI.DrawRect(dotRect, Color.red);
+
+            // 또는 레이블로 점 문자 사용 (GUIContent에 툴팁 추가 가능)
+            // GUIStyle dotStyle = new GUIStyle(EditorStyles.label);
+            // dotStyle.normal.textColor = Color.red;
+            // EditorGUI.LabelField(indicatorRect, new GUIContent("●", "이 필드는 필수 항목입니다."), dotStyle);
+
+            GUI.color = originalColor; // 원래 GUI 색상 복원
+        }
+        else
+        {
+            Color originalColor = GUI.color;
+            GUI.color = Color.green; // 붉은색 설정
+
+            // 작은 사각형(점처럼 보임) 또는 원 그리기
+            // EditorGUI.DrawRect(indicatorRect, Color.red); // 사각형
+            Rect dotRect = indicatorRect;
+            dotRect.width  =  5;                                      // 너비 조절
+            dotRect.height =  5;                                      // 높이 조절
+            dotRect.y      += (position.height - dotRect.height) / 2; // 수직 중앙 정렬
+            dotRect.x      += (indicatorWidth - dotRect.width) / 2;   // 수평 중앙 정렬 (선택적)
+            EditorGUI.DrawRect(dotRect, Color.green);
+
+            // 또는 레이블로 점 문자 사용 (GUIContent에 툴팁 추가 가능)
+            // GUIStyle dotStyle = new GUIStyle(EditorStyles.label);
+            // dotStyle.normal.textColor = Color.red;
+            // EditorGUI.LabelField(indicatorRect, new GUIContent("●", "이 필드는 필수 항목입니다."), dotStyle);
+
+            GUI.color = originalColor; // 원래 GUI 색상 복원
+        }
+
+        // 4. 원래 프로퍼티 필드 그리기
+        // 올바른 Indent 레벨로 프로퍼티 그리기
+        EditorGUI.indentLevel = originalIndent; // Indent 복원
+        EditorGUI.PropertyField(propertyRect, property, label, true); // true: 자식 프로퍼티도 그리기
+        EditorGUI.indentLevel = 0; // 다시 초기화 (다음 필드에 영향 안 주도록)
+
+    }
+
+    /// <summary>
+    /// 프로퍼티 높이 계산 (기본 높이 사용)
+    /// </summary>
+    public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+    {
+        // 표시기는 기존 높이 내에 그리므로 추가 높이 필요 없음
+        return EditorGUI.GetPropertyHeight(property, label, true); // 자식 프로퍼티 포함 높이
+    }
+
+    /// <summary>
+    /// 프로퍼티 타입에 따라 유효성(비어있는지/Null인지)을 검사합니다.
+    /// </summary>
+    private bool IsFieldInvalid(SerializedProperty property)
+    {
+        if (property == null) return true; // 프로퍼티 자체가 null이면 유효하지 않음
+
+        switch (property.propertyType)
+        {
+            case SerializedPropertyType.ObjectReference:
+                // UnityEngine.Object 파생 타입 (GameObject, Component, Material 등)
+                return property.objectReferenceValue == null;
+
+            case SerializedPropertyType.String:
+                // 문자열 타입
+                return string.IsNullOrEmpty(property.stringValue);
+
+            // 다른 타입에 대한 검사 추가 가능
+            case SerializedPropertyType.Integer:
+            case SerializedPropertyType.Float:
+                // 예: 특정 범위 밖에 있는지 검사 (Attribute에 파라미터 추가 필요)
+                // var rangeAttribute = attribute as RangeAttribute;
+                // if (rangeAttribute != null) { /* 범위 검사 */ }
+                return false; // 기본 숫자 타입은 비어있다는 개념이 없음
+
+            case SerializedPropertyType.ManagedReference: // [SerializeReference] 사용 시
+                 return property.managedReferenceValue == null;
+
+            // 배열이나 리스트가 비어있는지 검사 (선택적)
+            // case SerializedPropertyType.Generic: // 배열/리스트는 Generic
+            //     return property.isArray && property.arraySize == 0;
+
+            default:
+                return false; // 다른 타입은 기본적으로 유효하다고 간주
+        }
+    }
+}
