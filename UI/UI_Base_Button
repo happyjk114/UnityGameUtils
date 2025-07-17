@@ -1,0 +1,69 @@
+using DG.Tweening;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+public class UI_Base_Button : Button,IUI_Base
+{
+    public System.Action btnAction;
+    public RectTransform GetRect => transform as RectTransform;
+
+
+    public AnimationCurve normalCurve;
+    [SerializeField]  public float normalDuration = 0.1f;
+    public float normalScale    = 1f;
+
+    public AnimationCurve highlightCurve;
+    public float highlightDuration = 0.1f;
+    public float highlightScale    = 1.1f;
+    
+    public AnimationCurve pressCurve;
+    public float pressDuration = 0.1f;
+    public float pressScale    = 1.1f;
+
+    
+    public void SetBtnAction(System.Action _btnAction)
+    {
+        btnAction = _btnAction;
+    }
+
+    protected override void Start()
+    {
+        base.Start();
+        onClick.AddListener(OnClick);
+    }
+
+    public override void OnPointerEnter(PointerEventData eventData)
+    {
+        base.OnPointerEnter(eventData);
+        GetRect.DOKill();
+        GetRect.DOScale(Vector3.one * highlightScale, highlightDuration).SetEase(highlightCurve);
+    }
+
+    public override void OnPointerExit(PointerEventData eventData)
+    {
+        base.OnPointerExit(eventData);
+        GetRect.DOKill();
+        GetRect.DOScale(Vector3.one, normalDuration).SetEase(normalCurve);
+    }
+
+    protected void OnClick()
+    {
+        btnAction?.Invoke();
+        GetRect.DOKill();
+        GetRect.DOScale(Vector3.one * highlightScale, highlightDuration).SetEase(highlightCurve);
+    }
+    protected override void DoStateTransition(SelectionState state, bool instant)
+    {
+        base.DoStateTransition(state, instant);
+        switch (state)
+        {
+            case SelectionState.Pressed:
+                GetRect.DOKill();
+                GetRect.DOScale(Vector3.one * pressScale, pressDuration).SetEase(pressCurve);
+                break;
+
+        }
+    }
+
+}
