@@ -1,5 +1,27 @@
+using System;
+using UnityEngine;
+using DG.Tweening;
+
 public interface IUI_Base
 {
-    public RectTransform GetRect { get; }
+    public RectTransform ScaleRect { get; }
+}
+[Serializable]
+public class UITweenSet
+{
+    public AnimationCurve curve;
+    public float          duration = 0.1f;
+    public float        scale;
 }
 
+public static class Extension
+{
+    public static void UITweenSet_DoKill_DoScale_SetEase(
+        this Transform target,
+        UITweenSet     tweenSet)
+    {
+        target.DOKill();
+        target.DOScale(tweenSet.scale, tweenSet.duration).SetEase(tweenSet.curve);
+    }
+
+}
