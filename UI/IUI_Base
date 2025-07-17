@@ -1,0 +1,5 @@
+public interface IUI_Base
+{
+    public RectTransform GetRect { get; }
+}
+
