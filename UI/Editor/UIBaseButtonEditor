@@ -1,0 +1,65 @@
+using UnityEngine;
+using UnityEditor;
+using UnityEngine.UI;
+
+[CustomEditor(typeof(UI_Base_Button))]
+[CanEditMultipleObjects]
+public class UIBaseButtonEditor : UnityEditor.UI.ButtonEditor
+{
+    SerializedProperty normalCurve;
+    SerializedProperty normalDuration;
+    SerializedProperty normalScale;
+    SerializedProperty highlightCurve;
+    SerializedProperty highlightDuration;
+    SerializedProperty highlightScale;
+    SerializedProperty pressCurve;
+    SerializedProperty pressDuration;
+    SerializedProperty pressScale;
+
+    protected override void OnEnable()
+    {
+        base.OnEnable();
+
+        // 추가한 각 필드의 SerializedProperty 참조
+        normalCurve      = serializedObject.FindProperty("normalCurve");
+        normalDuration   = serializedObject.FindProperty("normalDuration");
+        normalScale      = serializedObject.FindProperty("normalScale");
+        highlightCurve   = serializedObject.FindProperty("highlightCurve");
+        highlightDuration= serializedObject.FindProperty("highlightDuration");
+        highlightScale   = serializedObject.FindProperty("highlightScale");
+        pressCurve       = serializedObject.FindProperty("pressCurve");
+        pressDuration    = serializedObject.FindProperty("pressDuration");
+        pressScale       = serializedObject.FindProperty("pressScale");
+    }
+
+    public override void OnInspectorGUI()
+    {
+        // -----------------------
+        // 기본 Button UI 먼저 그림
+        base.OnInspectorGUI();
+
+        // -----------------------
+        // custom UI 필드 그리기
+        serializedObject.Update();
+
+        EditorGUILayout.Space();
+        EditorGUILayout.LabelField("DOTween Animation Properties", EditorStyles.boldLabel);
+
+        EditorGUILayout.LabelField("Normal State", EditorStyles.miniBoldLabel);
+        EditorGUILayout.PropertyField(normalCurve);
+        EditorGUILayout.PropertyField(normalDuration);
+        EditorGUILayout.PropertyField(normalScale);
+
+        EditorGUILayout.LabelField("Highlight State", EditorStyles.miniBoldLabel);
+        EditorGUILayout.PropertyField(highlightCurve);
+        EditorGUILayout.PropertyField(highlightDuration);
+        EditorGUILayout.PropertyField(highlightScale);
+
+        EditorGUILayout.LabelField("Press State", EditorStyles.miniBoldLabel);
+        EditorGUILayout.PropertyField(pressCurve);
+        EditorGUILayout.PropertyField(pressDuration);
+        EditorGUILayout.PropertyField(pressScale);
+
+        serializedObject.ApplyModifiedProperties();
+    }
+}
