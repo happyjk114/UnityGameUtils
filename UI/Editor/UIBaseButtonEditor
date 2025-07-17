@@ -6,30 +6,21 @@ using UnityEngine.UI;
 [CanEditMultipleObjects]
 public class UIBaseButtonEditor : UnityEditor.UI.ButtonEditor
 {
-    SerializedProperty normalCurve;
-    SerializedProperty normalDuration;
-    SerializedProperty normalScale;
-    SerializedProperty highlightCurve;
-    SerializedProperty highlightDuration;
-    SerializedProperty highlightScale;
-    SerializedProperty pressCurve;
-    SerializedProperty pressDuration;
-    SerializedProperty pressScale;
+    
+    SerializedProperty scaleRect;
+    SerializedProperty normalTweenSet;
+    SerializedProperty highlightTweenSet;
+    SerializedProperty pressTweenSet;
 
     protected override void OnEnable()
     {
         base.OnEnable();
 
         // 추가한 각 필드의 SerializedProperty 참조
-        normalCurve      = serializedObject.FindProperty("normalCurve");
-        normalDuration   = serializedObject.FindProperty("normalDuration");
-        normalScale      = serializedObject.FindProperty("normalScale");
-        highlightCurve   = serializedObject.FindProperty("highlightCurve");
-        highlightDuration= serializedObject.FindProperty("highlightDuration");
-        highlightScale   = serializedObject.FindProperty("highlightScale");
-        pressCurve       = serializedObject.FindProperty("pressCurve");
-        pressDuration    = serializedObject.FindProperty("pressDuration");
-        pressScale       = serializedObject.FindProperty("pressScale");
+        scaleRect = serializedObject.FindProperty("scaleRect");
+        normalTweenSet = serializedObject.FindProperty("normalTweenSet");
+        highlightTweenSet = serializedObject.FindProperty("highlightTweenSet");
+        pressTweenSet = serializedObject.FindProperty("pressTweenSet");
     }
 
     public override void OnInspectorGUI()
@@ -43,23 +34,11 @@ public class UIBaseButtonEditor : UnityEditor.UI.ButtonEditor
         serializedObject.Update();
 
         EditorGUILayout.Space();
-        EditorGUILayout.LabelField("DOTween Animation Properties", EditorStyles.boldLabel);
-
-        EditorGUILayout.LabelField("Normal State", EditorStyles.miniBoldLabel);
-        EditorGUILayout.PropertyField(normalCurve);
-        EditorGUILayout.PropertyField(normalDuration);
-        EditorGUILayout.PropertyField(normalScale);
-
-        EditorGUILayout.LabelField("Highlight State", EditorStyles.miniBoldLabel);
-        EditorGUILayout.PropertyField(highlightCurve);
-        EditorGUILayout.PropertyField(highlightDuration);
-        EditorGUILayout.PropertyField(highlightScale);
-
-        EditorGUILayout.LabelField("Press State", EditorStyles.miniBoldLabel);
-        EditorGUILayout.PropertyField(pressCurve);
-        EditorGUILayout.PropertyField(pressDuration);
-        EditorGUILayout.PropertyField(pressScale);
-
+        
+        EditorGUILayout.PropertyField(scaleRect);
+        EditorGUILayout.PropertyField(normalTweenSet);
+        EditorGUILayout.PropertyField(highlightTweenSet);
+        EditorGUILayout.PropertyField(pressTweenSet);
         serializedObject.ApplyModifiedProperties();
     }
 }
