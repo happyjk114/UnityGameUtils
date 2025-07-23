@@ -1,0 +1,848 @@
+using UnityEditor;
+using UnityEngine;
+using System;
+using System.Collections;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Data;
+using System.Text.RegularExpressions;
+using ExcelDataReader;
+using Newtonsoft.Json;
+using FileMode = System.IO.FileMode;
+using System.Globalization;
+#if UNITY_EDITOR
+using UnityEditor.VersionControl;
+#endif
+
+/// <summary>
+/// 스크립트 컴파일이 완료된 후 Excel Importer의 에셋 생성 단계를 자동으로 재개합니다.
+/// </summary>
+[InitializeOnLoad]
+public class ExcelImporterAutoRunner
+{
+    private const string PENDING_FLAG = "ExcelImporter_PendingSOGeneration";
+
+    static ExcelImporterAutoRunner()
+    {
+        if (EditorPrefs.GetBool(PENDING_FLAG, false))
+        {
+            EditorApplication.update += OnUpdate;
+        }
+    }
+
+    static void OnUpdate()
+    {
+        if (!EditorApplication.isCompiling)
+        {
+            EditorApplication.update -= OnUpdate;
+            EditorPrefs.DeleteKey(PENDING_FLAG);
+
+            var window = EditorWindow.GetWindow<ExcelExport>("Excel Export");
+            window.Show();
+            window.Log("컴파일이 완료되었습니다. 에셋 생성을 재개합니다.");
+            window.CreateScriptableObjects();
+        }
+    }
+}
+
+
+public class ExcelExport : EditorWindow
+{
+    // 경로 설정
+    private const string EXCEL_SOURCE_FOLDER_PATH = "Assets/ProjectAshAssets/Data/";
+    private const string SCRIPT_FOLDER_PATH = "Assets/ProjectAshAssets/Data/Scripts/Generated/";
+    private const string ENUM_SCRIPT_FOLDER_PATH = "Assets/ProjectAshAssets/Data/Scripts/Generated/Enums/";
+    private const string SO_FOLDER_PATH = "Assets/ProjectAshAssets/Data/Resources/GameData/";
+
+    // 자동 재개를 위한 임시 데이터 파일 및 플래그
+    private const string PENDING_SO_GENERATION_FILE = "Temp/PendingExcelSOGeneration.json";
+    private const string PENDING_FLAG = "ExcelImporter_PendingSOGeneration";
+
+    // 로그 표시용 변수
+    private readonly StringBuilder logBuilder = new StringBuilder();
+    private Vector2 scrollPosition;
+    private GUIStyle logStyle;
+
+    #region Data Structures
+    [System.Serializable]
+    private class ParsedExcelData
+    {
+        public string FilePath;
+        public string ClassName;
+        public string[] ReferenceValues;
+        public string[] DataTypes;
+        public string[] VariableNames;
+        public List<object[]> DataRows;
+    }
+
+    [System.Serializable]
+    private class ParsedEnumData
+    {
+        public string EnumName;
+        public List<string> Values;
+    }
+
+    [System.Serializable]
+    private class GenerationPayload
+    {
+        public List<ParsedExcelData> ParsedDataList;
+        public List<ParsedEnumData> ParsedEnumList;
+    }
+    #endregion
+
+    [MenuItem("Tools/Excel Export")]
+    public static void ShowWindow()
+    {
+        GetWindow<ExcelExport>("Excel Export");
+    }
+
+    #region GUI
+    void OnGUI()
+    {
+        GUILayout.Label("Excel Export (Full Automation)", EditorStyles.boldLabel);
+        EditorGUILayout.HelpBox(
+            "[사용법]\n" +
+            "1. 'Assets/ProjectAshAssets/Data/' 폴더에 Excel(.xlsx) 파일과 Enum 정의(.json) 파일을 배치합니다.\n" +
+            "2. 'Import All Data' 버튼을 누르면 모든 과정이 자동으로 처리됩니다.\n\n" +
+            "[Enum JSON 파일 규칙 (예: BattleEnums.json)]\n" +
+            "{\n" +
+            "  \"BattleEmotion\": [ \"RAGE = 1\", \"FEAR = 2\" ],\n" +
+            "  \"BattleWeaponType\": [ \"SWORD = 10\", \"AXE = 11\" ]\n"+
+            "}\n" +
+            "-> BattleEnums.cs 파일 하나가 생성됩니다.\n\n" +
+            "[엑셀 파일 규칙]\n" +
+            "- 1행: 참조 테이블명 (예: MonsterTable). 비워두면 참조 검사를 하지 않습니다.\n" +
+            "- 2행: 데이터 타입 (int, string, bool, float, dateTime, 또는 생성된 Enum 이름)\n" +
+            "- 3행: 변수명 (C# 변수명 규칙을 따라야 함)\n" +
+            "- 4행부터: 실제 데이터\n" +
+            "- 1열 (A열): 반드시 'ID' 또는 'id' 컬럼 (타입: string)\n" +
+            "- 배열/리스트: 타입명 뒤에 's'를 붙입니다. (예: ints, strings)",
+            MessageType.Info);
+
+        if (GUILayout.Button("Import All Data"))
+        {
+            ImportAllData();
+        }
+
+        DrawLogWindow();
+    }
+
+    private void DrawLogWindow()
+    {
+        if (logStyle == null)
+        {
+            logStyle = new GUIStyle(EditorStyles.label) { richText = true, wordWrap = true };
+        }
+        EditorGUILayout.Space();
+        GUILayout.Label("Logs", EditorStyles.boldLabel);
+        scrollPosition = EditorGUILayout.BeginScrollView(scrollPosition, EditorStyles.helpBox);
+        EditorGUILayout.SelectableLabel(logBuilder.ToString(), logStyle, GUILayout.ExpandHeight(true));
+        EditorGUILayout.EndScrollView();
+        if (GUILayout.Button("Clear Log"))
+        {
+            logBuilder.Clear();
+        }
+    }
+    #endregion
+
+    #region Main Logic Flow
+    private void ImportAllData()
+    {
+        logBuilder.Clear();
+        Log("--- 전체 임포트 프로세스 시작 ---");
+
+        bool scriptsChanged = false;
+
+        var parsedEnumList = ParseAndGenerateEnumScripts(out bool enumScriptsChanged);
+        scriptsChanged |= enumScriptsChanged;
+
+        var parsedDataList = ParseAndGenerateTableScripts(parsedEnumList, out bool tableScriptsChanged);
+        scriptsChanged |= tableScriptsChanged;
+
+        if (parsedDataList == null)
+        {
+            LogCritical("Excel 파일 처리 중 치명적 오류가 발생했습니다. 프로세스를 중단합니다.");
+            return;
+        }
+
+        if (parsedDataList.Count == 0 && parsedEnumList.Count == 0)
+        {
+            Log("처리할 유효한 Excel 또는 JSON 파일이 없습니다.");
+            return;
+        }
+
+        var payload = new GenerationPayload { ParsedDataList = parsedDataList, ParsedEnumList = parsedEnumList };
+        string jsonPayload = JsonConvert.SerializeObject(payload, Formatting.Indented);
+        if (!Directory.Exists("Temp")) Directory.CreateDirectory("Temp");
+        File.WriteAllText(PENDING_SO_GENERATION_FILE, jsonPayload);
+
+        if (scriptsChanged)
+        {
+            LogWarning("스크립트 변경이 감지되었습니다. Unity 에디터가 컴파일을 시작합니다.");
+            LogWarning("컴파일 완료 후 에셋 생성이 자동으로 재개됩니다.");
+            EditorPrefs.SetBool(PENDING_FLAG, true);
+            AssetDatabase.Refresh(ImportAssetOptions.ForceUpdate);
+        }
+        else
+        {
+            Log("스크립트 변경사항이 없습니다. 바로 에셋 생성을 시작합니다.");
+            CreateScriptableObjects();
+        }
+    }
+
+    internal void CreateScriptableObjects()
+    {
+        if (logBuilder.Length == 0) logBuilder.Clear();
+        Log("--- ScriptableObject 생성 시작 ---");
+
+        if (!File.Exists(PENDING_SO_GENERATION_FILE))
+        {
+            LogCritical($"임시 데이터 파일({PENDING_SO_GENERATION_FILE})이 없습니다. 'Import All Data'를 먼저 실행해야 합니다.");
+            return;
+        }
+
+        string json = File.ReadAllText(PENDING_SO_GENERATION_FILE);
+        File.Delete(PENDING_SO_GENERATION_FILE);
+
+        var payload = JsonConvert.DeserializeObject<GenerationPayload>(json);
+        if (payload.ParsedDataList.Count == 0)
+        {
+            Log("생성할 데이터 에셋이 없습니다. 프로세스를 종료합니다.");
+            return;
+        }
+
+        // --- 1단계: 모든 테이블의 ID를 메모리에 미리 로드하여 '마스터 ID 맵' 생성 ---
+        Log("--- 1단계: 모든 테이블 데이터 사전 분석 시작 ---");
+        var masterIdMap = new Dictionary<string, HashSet<string>>();
+        foreach (var data in payload.ParsedDataList)
+        {
+            var ids = new HashSet<string>();
+            foreach (var row in data.DataRows)
+            {
+                if (row.Length > 0 && row[0] != null && !string.IsNullOrWhiteSpace(row[0].ToString()))
+                {
+                    ids.Add(row[0].ToString().Trim());
+                }
+            }
+            masterIdMap[data.ClassName] = ids;
+            Log($"테이블 '{data.ClassName}'에서 {ids.Count}개의 ID를 분석했습니다.");
+        }
+        Log("--- 1단계: 모든 테이블 데이터 사전 분석 완료 ---");
+
+        // --- 2단계: 참조용 에셋 파일 선행 생성 ---
+        Log("\n--- 2단계: 에셋 파일 생성/확인 시작 ---");
+        bool newAssetsCreated = false;
+        foreach (var data in payload.ParsedDataList)
+        {
+            string assetPath = Path.Combine(SO_FOLDER_PATH, $"{data.ClassName}.asset");
+            if (!File.Exists(assetPath))
+            {
+                Type containerType = GetTypeByName(data.ClassName);
+                if (containerType != null)
+                {
+                    if (!Directory.Exists(SO_FOLDER_PATH)) Directory.CreateDirectory(SO_FOLDER_PATH);
+                    ScriptableObject instance = CreateInstance(containerType);
+                    AssetDatabase.CreateAsset(instance, assetPath);
+                    Log($"새 에셋 파일 생성: {Path.GetFileName(assetPath)}");
+                    newAssetsCreated = true;
+                }
+                else
+                {
+                    LogWarning($"[에셋 생성 스킵] 파일: '{Path.GetFileName(data.FilePath)}'에 대한 클래스 타입 '{data.ClassName}'을 찾을 수 없어 에셋 파일을 미리 생성할 수 없습니다.");
+                }
+            }
+        }
+
+        if (newAssetsCreated)
+        {
+            Log("새 에셋 파일 생성이 완료되었습니다. 에셋 데이터베이스를 새로고침합니다.");
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+        }
+        else
+        {
+            Log("새로 생성할 에셋 파일이 없습니다.");
+        }
+        Log("--- 2단계: 에셋 파일 생성/확인 완료 ---");
+
+        // --- 3단계: 데이터 채우기 및 유효성 검사 ---
+        Log("\n--- 3단계: 데이터 채우기 및 유효성 검사 시작 ---");
+        var successFiles = new List<string>();
+        var failedFiles = new List<string>();
+
+        foreach (var data in payload.ParsedDataList)
+        {
+            string fileName = Path.GetFileName(data.FilePath);
+            Log($"--- 데이터 처리 중: {fileName} ---");
+            ScriptableObject generatedSO = GenerateSingleScriptableObject(data, masterIdMap);
+
+            if (generatedSO != null) successFiles.Add(fileName);
+            else failedFiles.Add(fileName);
+        }
+
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        LogSummary(successFiles, failedFiles);
+        Log("\n--- 전체 임포트 프로세스 완료 ---");
+    }
+    #endregion
+
+    #region Step 1: Enum Parsing and Generation
+    private List<ParsedEnumData> ParseAndGenerateEnumScripts(out bool scriptsChanged)
+    {
+        scriptsChanged = false;
+        var allParsedEnums = new List<ParsedEnumData>();
+        string[] allJsonFiles = Directory.GetFiles(EXCEL_SOURCE_FOLDER_PATH, "*.json", SearchOption.AllDirectories);
+
+        Log($"총 {allJsonFiles.Length}개의 JSON 파일을 찾았습니다.");
+        foreach (string filePath in allJsonFiles)
+        {
+            string fileName = Path.GetFileName(filePath);
+            try
+            {
+                string jsonContent = File.ReadAllText(filePath);
+                var enumsInFile = JsonConvert.DeserializeObject<Dictionary<string, List<string>>>(jsonContent);
+
+                if (enumsInFile == null || enumsInFile.Count == 0) continue;
+
+                var enumsToGenerate = new List<ParsedEnumData>();
+                foreach (var kvp in enumsInFile)
+                {
+                    var enumData = new ParsedEnumData { EnumName = kvp.Key, Values = kvp.Value };
+                    enumsToGenerate.Add(enumData);
+                    allParsedEnums.Add(enumData);
+                }
+
+                if (GenerateEnumsScript(enumsToGenerate, filePath))
+                {
+                    scriptsChanged = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogCritical($"[JSON 형식 오류] 파일: '{fileName}'. 이 파일의 내용을 읽는 데 실패했습니다. JSON 문법(쉼표, 따옴표, 괄호 등)이 올바른지 확인해주세요. 상세 정보: {ex.Message}");
+            }
+        }
+        return allParsedEnums;
+    }
+
+    private bool GenerateEnumsScript(List<ParsedEnumData> enums, string sourceJsonPath)
+    {
+        if (enums == null || enums.Count == 0) return false;
+
+        if (!Directory.Exists(ENUM_SCRIPT_FOLDER_PATH)) Directory.CreateDirectory(ENUM_SCRIPT_FOLDER_PATH);
+
+        string scriptFileName = $"{Path.GetFileNameWithoutExtension(sourceJsonPath)}.cs";
+        string scriptPath = Path.Combine(ENUM_SCRIPT_FOLDER_PATH, scriptFileName);
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"// Auto-generated by ExcelExport from {Path.GetFileName(sourceJsonPath)}");
+        sb.AppendLine();
+
+        foreach (var data in enums)
+        {
+            sb.AppendLine($"public enum {data.EnumName}");
+            sb.AppendLine("{");
+            foreach (string value in data.Values)
+            {
+                sb.AppendLine($"    {value},");
+            }
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
+
+        string newContent = sb.ToString();
+        return WriteScriptIfChanged(scriptPath, newContent, $"Enum 스크립트 생성/업데이트: {scriptFileName}");
+    }
+    #endregion
+
+    #region Step 2: Excel Parsing and Class Generation
+    private List<ParsedExcelData> ParseAndGenerateTableScripts(List<ParsedEnumData> parsedEnumList, out bool scriptsChanged)
+    {
+        scriptsChanged = false;
+        var parsedDataList = new List<ParsedExcelData>();
+        string[] allExcelFiles = Directory.GetFiles(EXCEL_SOURCE_FOLDER_PATH, "*.xlsx", SearchOption.AllDirectories);
+
+        Log($"총 {allExcelFiles.Length}개의 Excel 파일을 찾았습니다.");
+        foreach (string filePath in allExcelFiles)
+        {
+            if (Path.GetFileName(filePath).StartsWith("~$")) continue;
+
+            ParsedExcelData data = ParseSingleExcelFile(filePath);
+            if (data == null) continue;
+
+            if (!ValidateVariableNames(data)) continue;
+            if (!ValidateDataTypes(data, parsedEnumList)) continue;
+
+            parsedDataList.Add(data);
+            if (GenerateClassScript(data) == true)
+            {
+                scriptsChanged = true;
+            }
+        }
+        return parsedDataList;
+    }
+
+    private ParsedExcelData ParseSingleExcelFile(string filePath)
+    {
+        string fileName = Path.GetFileName(filePath);
+        try
+        {
+            using (var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = ExcelReaderFactory.CreateReader(stream))
+            {
+                var result = reader.AsDataSet();
+                DataTable table = result.Tables[0];
+                if (table.Rows.Count < 3)
+                {
+                    LogWarning($"[파싱 실패] 파일: '{fileName}'. 헤더 정보(참조, 타입, 이름)가 부족합니다 (최소 3행 필요). 이 파일은 건너뜁니다.");
+                    return null;
+                }
+
+                string[] referenceValues = table.Rows[0].ItemArray.Select(o => o?.ToString().Trim() ?? "").ToArray();
+                string[] dataTypes = table.Rows[1].ItemArray.Select(o => o?.ToString().Trim() ?? "").ToArray();
+                string[] variableNames = table.Rows[2].ItemArray.Select(o => o?.ToString().Trim() ?? "").ToArray();
+
+                if (dataTypes.Length < 1 || variableNames.Length < 1)
+                {
+                    LogCritical($"[파싱 실패] 파일: '{fileName}'. 2행(타입) 또는 3행(이름)에 데이터가 없습니다.");
+                    return null;
+                }
+
+                if (!dataTypes[0].Equals("string", StringComparison.OrdinalIgnoreCase))
+                {
+                    LogCritical($"[파싱 실패] 파일: '{fileName}'. 1열(A열)의 타입(2행)은 반드시 'string'이어야 합니다. 현재 값: '{dataTypes[0]}'");
+                    return null;
+                }
+
+                if (!variableNames[0].Equals("ID", StringComparison.OrdinalIgnoreCase))
+                {
+                    LogCritical($"[파싱 실패] 파일: '{fileName}'. 1열(A열)의 이름(3행)은 반드시 'ID' 또는 'id'여야 합니다. 현재 값: '{variableNames[0]}'");
+                    return null;
+                }
+
+                var dataRows = new List<object[]>();
+                for (int i = 3; i < table.Rows.Count; i++)
+                {
+                    dataRows.Add(table.Rows[i].ItemArray);
+                }
+
+                return new ParsedExcelData
+                {
+                    FilePath = filePath,
+                    ClassName = Path.GetFileNameWithoutExtension(filePath),
+                    ReferenceValues = referenceValues,
+                    DataTypes = dataTypes,
+                    VariableNames = variableNames,
+                    DataRows = dataRows
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            LogCritical($"[Excel 파일 읽기 오류] 파일: '{fileName}'. 파일을 열거나 읽는 데 실패했습니다. 파일이 손상되었거나 다른 프로그램에서 사용 중인지 확인해주세요. 상세 정보: {ex.Message}");
+            return null;
+        }
+    }
+
+    private bool? GenerateClassScript(ParsedExcelData data)
+    {
+        try
+        {
+            if (!Directory.Exists(SCRIPT_FOLDER_PATH)) Directory.CreateDirectory(SCRIPT_FOLDER_PATH);
+            string scriptPath = Path.Combine(SCRIPT_FOLDER_PATH, $"{data.ClassName}.cs");
+            string itemClassName = $"{data.ClassName}Item";
+
+            var sb = new StringBuilder();
+            sb.AppendLine("// Auto-generated by ExcelExport");
+            sb.AppendLine("using UnityEngine;");
+            sb.AppendLine("using System.Collections.Generic;");
+            sb.AppendLine();
+            sb.AppendLine("[System.Serializable]");
+            sb.AppendLine($"public class {itemClassName} {{");
+            for (int i = 0; i < data.VariableNames.Length; i++)
+            {
+                if (string.IsNullOrWhiteSpace(data.VariableNames[i]) || string.IsNullOrWhiteSpace(data.DataTypes[i])) continue;
+                string fieldType = GetCSharpTypeString(data.DataTypes[i]);
+                string fieldName = data.VariableNames[i].Equals("id", StringComparison.OrdinalIgnoreCase) ? "ID" : data.VariableNames[i];
+                sb.AppendLine($"    public {fieldType} {fieldName};");
+            }
+            sb.AppendLine("}");
+            sb.AppendLine();
+            sb.AppendLine($"[CreateAssetMenu(fileName = \"{data.ClassName}\", menuName = \"ScriptableObjects/{data.ClassName}\")]");
+            sb.AppendLine($"public class {data.ClassName} : ScriptableObject, ISerializationCallbackReceiver {{");
+            sb.AppendLine($"    [System.NonSerialized]");
+            sb.AppendLine($"    public Dictionary<string, {itemClassName}> Items = new Dictionary<string, {itemClassName}>();");
+            sb.AppendLine();
+            sb.AppendLine($"    [SerializeField] private List<string> _keys = new List<string>();");
+            sb.AppendLine($"    [SerializeField] private List<{itemClassName}> _values = new List<{itemClassName}>();");
+            sb.AppendLine();
+            sb.AppendLine("    public void OnBeforeSerialize() {");
+            sb.AppendLine("        _keys.Clear(); _values.Clear();");
+            sb.AppendLine("        foreach (var kvp in Items) { _keys.Add(kvp.Key); _values.Add(kvp.Value); }");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+            sb.AppendLine("    public void OnAfterDeserialize() {");
+            sb.AppendLine($"        Items = new Dictionary<string, {itemClassName}>();");
+            sb.AppendLine("        for (int i = 0; i < _keys.Count; i++) { if (i < _values.Count) Items.Add(_keys[i], _values[i]); }");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+
+            return WriteScriptIfChanged(scriptPath, sb.ToString(), $"클래스 스크립트 생성/업데이트: {data.ClassName}.cs");
+        }
+        catch (Exception ex)
+        {
+            LogCritical($"[스크립트 생성 오류] Excel 파일: '{Path.GetFileName(data.FilePath)}'. 이 파일을 기반으로 C# 스크립트 '{data.ClassName}.cs'를 생성하는 중 오류가 발생했습니다. 상세 정보: {ex.Message}");
+            return null;
+        }
+    }
+    #endregion
+
+    #region Step 3: Asset Generation and Validation
+    private ScriptableObject GenerateSingleScriptableObject(ParsedExcelData data, Dictionary<string, HashSet<string>> masterIdMap)
+    {
+        string fileName = Path.GetFileName(data.FilePath);
+        try
+        {
+            string itemClassName = $"{data.ClassName}Item";
+            Type itemType = GetTypeByName(itemClassName);
+            Type containerType = GetTypeByName(data.ClassName);
+
+            if (itemType == null || containerType == null)
+            {
+                LogCritical($"[스크립트 누락] 파일: '{fileName}'. 데이터를 담을 C# 클래스('{data.ClassName}')를 찾을 수 없습니다. 스크립트가 생성되지 않았거나 컴파일 오류가 발생했을 수 있습니다. Unity 콘솔에서 다른 오류를 확인해주세요.");
+                return null;
+            }
+
+            FieldInfo dictField = containerType.GetField("Items", BindingFlags.Public | BindingFlags.Instance);
+            var newDict = (IDictionary)Activator.CreateInstance(dictField.FieldType);
+            FieldInfo[] fields = itemType.GetFields(BindingFlags.Public | BindingFlags.Instance);
+
+            for (int rowIndex = 0; rowIndex < data.DataRows.Count; rowIndex++)
+            {
+                object[] rowData = data.DataRows[rowIndex];
+                int excelRowNumber = rowIndex + 4;
+
+                if (rowData.Length < 1 || rowData[0] == null || string.IsNullOrWhiteSpace(rowData[0].ToString())) continue;
+
+                var item = Activator.CreateInstance(itemType);
+                string idValue = "";
+                bool rowIsValid = true;
+
+                for (int i = 0; i < data.VariableNames.Length; i++)
+                {
+                    string varName = data.VariableNames[i];
+                    if (string.IsNullOrWhiteSpace(varName)) continue;
+
+                    string fieldName = varName.Equals("id", StringComparison.OrdinalIgnoreCase) ? "ID" : varName;
+                    FieldInfo field = fields.FirstOrDefault(f => f.Name == fieldName);
+                    if (field == null) continue;
+
+                    object rawValue = (i < rowData.Length) ? rowData[i] : null;
+                    string reference = data.ReferenceValues[i];
+
+                    try
+                    {
+                        if (IsReferenceToTable(reference))
+                        {
+                            if (!ValidateTableReference(reference, rawValue, masterIdMap, fileName, excelRowNumber, varName))
+                            {
+                                rowIsValid = false;
+                                break;
+                            }
+                        }
+
+                        object convertedValue = ConvertValue(rawValue, field.FieldType);
+                        field.SetValue(item, convertedValue);
+                        if (fieldName == "ID") idValue = (string)convertedValue;
+                    }
+                    catch (Exception)
+                    {
+                        LogWarning($"[데이터 타입 불일치] 파일: '{fileName}', 행: {excelRowNumber}, 열: '{varName}'. 셀의 값 '{rawValue}'을(를) 지정된 데이터 타입 '{field.FieldType.Name}'(으)로 변환할 수 없습니다. Excel 파일의 데이터를 확인해주세요.");
+                        rowIsValid = false;
+                        break;
+                    }
+                }
+
+                if (rowIsValid)
+                {
+                    if (newDict.Contains(idValue))
+                    {
+                        LogWarning($"[ID 중복 경고] 파일: '{fileName}', 행: {excelRowNumber}. ID '{idValue}'가 중복됩니다. 이전 데이터를 덮어씁니다.");
+                    }
+                    newDict[idValue] = item;
+                }
+                else
+                {
+                    // ✨ [추가됨] 데이터 행이 건너뛰어졌음을 명시적으로 알립니다.
+                    LogWarning($"[데이터 행 건너뜀] 파일: '{fileName}', 행: {excelRowNumber}. 이전에 보고된 오류로 인해 이 데이터 행 전체가 추가되지 않았습니다.");
+                }
+            }
+
+            string assetPath = Path.Combine(SO_FOLDER_PATH, $"{data.ClassName}.asset");
+            var soContainer = AssetDatabase.LoadAssetAtPath<ScriptableObject>(assetPath);
+
+            if (soContainer == null)
+            {
+                LogWarning($"에셋 파일 '{Path.GetFileName(assetPath)}'이(가) 없어 새로 생성합니다. (2단계에서 생성 실패)");
+                if (!Directory.Exists(SO_FOLDER_PATH)) Directory.CreateDirectory(SO_FOLDER_PATH);
+                soContainer = CreateInstance(containerType);
+                AssetDatabase.CreateAsset(soContainer, assetPath);
+            }
+
+            if (!CheckoutAndMakeWritable(assetPath)) return null;
+
+            dictField.SetValue(soContainer, newDict);
+            EditorUtility.SetDirty(soContainer);
+
+            Log($"[성공] 에셋 '{Path.GetFileName(assetPath)}' 데이터 채우기 완료.");
+            return soContainer;
+        }
+        catch (Exception ex)
+        {
+            LogCritical($"[에셋 생성 실패] 파일: '{fileName}'. 이 Excel 파일의 데이터로 에셋을 생성하는 중 예측하지 못한 오류가 발생했습니다. 상세 정보: {ex.ToString()}");
+            return null;
+        }
+    }
+
+    private bool ValidateTableReference(string tableName, object idValue, Dictionary<string, HashSet<string>> masterIdMap, string sourceFile, int row, string col)
+    {
+        if (idValue == null || string.IsNullOrWhiteSpace(idValue.ToString())) return true;
+
+        if (!masterIdMap.TryGetValue(tableName, out HashSet<string> validIds))
+        {
+            LogWarning($"[참조 테이블 없음] 파일: '{sourceFile}', 행: {row}, (변수명: '{col}'). 참조하려는 테이블 '{tableName}'에 해당하는 Excel 파일(.xlsx)을 찾을 수 없습니다.");
+            return false;
+        }
+
+        string[] idStrings = idValue.ToString().Split(',');
+
+        foreach (string id in idStrings)
+        {
+            string trimmedId = id.Trim();
+            if (string.IsNullOrEmpty(trimmedId)) continue;
+
+            if (!validIds.Contains(trimmedId))
+            {
+                LogWarning($"[참조 ID 없음] 파일: '{sourceFile}', 행: {row}, (변수명: '{col}'). 참조 테이블 '{tableName}'에 ID '{trimmedId}'가 존재하지 않습니다. (전체 값: '{idValue}')");
+                return false;
+            }
+        }
+
+        return true;
+    }
+    #endregion
+
+    #region Utilities
+    public void Log(string message)
+    {
+        Debug.Log(message);
+        logBuilder.AppendLine($"[{DateTime.Now:HH:mm:ss}] [INFO] {message}");
+        Repaint();
+    }
+    private void LogWarning(string message)
+    {
+        Debug.LogWarning(message);
+        logBuilder.AppendLine($"[{DateTime.Now:HH:mm:ss}] <color=orange>[WARNING] {message}</color>");
+        Repaint();
+    }
+    private void LogCritical(string message)
+    {
+        Debug.LogError(message);
+        logBuilder.AppendLine($"[{DateTime.Now:HH:mm:ss}] <color=red>[CRITICAL] {message}</color>");
+        Repaint();
+    }
+    private void LogSummary(List<string> success, List<string> failed)
+    {
+        logBuilder.AppendLine("\n================= 프로세스 요약 ==================");
+        logBuilder.AppendLine($"성공: {success.Count}, 실패: {failed.Count}");
+        if (success.Any()) logBuilder.AppendLine($"\n--- 성공한 파일 ---\n{string.Join("\n", success.Distinct())}");
+        if (failed.Any()) logBuilder.AppendLine($"\n--- 실패한 파일 ---\n{string.Join("\n", failed.Distinct())}");
+        logBuilder.AppendLine("==============================================");
+        Repaint();
+    }
+
+    private bool WriteScriptIfChanged(string path, string newContent, string logMessage)
+    {
+        bool hasChanged = true;
+        if (File.Exists(path))
+        {
+            string oldContent = File.ReadAllText(path).Replace("\r\n", "\n");
+            if (oldContent == newContent.Replace("\r\n", "\n")) hasChanged = false;
+        }
+
+        if (hasChanged)
+        {
+            Log(logMessage);
+            if (!CheckoutAndMakeWritable(path)) return false;
+            File.WriteAllText(path, newContent, Encoding.UTF8);
+        }
+        return hasChanged;
+    }
+
+    private bool CheckoutAndMakeWritable(string path)
+    {
+        if (!File.Exists(path)) return true;
+        if (Provider.isActive)
+        {
+            var asset = Provider.GetAssetByPath(path);
+            if (asset != null && !Provider.IsOpenForEdit(asset))
+            {
+                Log($"VCS에서 파일 체크아웃 시도: {path}");
+                var task = Provider.Checkout(asset, CheckoutMode.Asset);
+                task.Wait();
+                if (!task.success)
+                {
+                    LogCritical($"파일 체크아웃 실패: {path}. 수동으로 체크아웃 해주세요.");
+                    return false;
+                }
+            }
+        }
+        else if (new FileInfo(path).IsReadOnly)
+        {
+            new FileInfo(path).IsReadOnly = false;
+        }
+        return true;
+    }
+
+    private string GetCSharpTypeString(string rawType)
+    {
+        if (string.IsNullOrWhiteSpace(rawType)) return "string";
+        string lowerType = rawType.ToLower();
+        if (lowerType.EndsWith("s") && lowerType != "s" && lowerType != "bools")
+        {
+            string baseType = GetCSharpTypeString(rawType.Substring(0, rawType.Length - 1));
+            return $"List<{baseType}>";
+        }
+        switch (lowerType)
+        {
+            case "int": return "int";
+            case "string": return "string";
+            case "float": return "float";
+            case "bool": return "bool";
+            case "datetime": return "System.DateTime";
+            default: return rawType;
+        }
+    }
+
+    private static object ConvertValue(object rawValue, Type targetType)
+    {
+        if (rawValue == null || rawValue is DBNull || string.IsNullOrWhiteSpace(rawValue.ToString()))
+        {
+            if (targetType.IsValueType) return Activator.CreateInstance(targetType);
+            if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(List<>)) return Activator.CreateInstance(targetType);
+            return null;
+        }
+
+        if (targetType.IsGenericType && targetType.GetGenericTypeDefinition() == typeof(List<>))
+        {
+            Type itemType = targetType.GetGenericArguments()[0];
+            var list = (IList)Activator.CreateInstance(targetType);
+            string[] splitValues = rawValue.ToString().Split(',');
+            foreach (string s in splitValues)
+            {
+                if (string.IsNullOrWhiteSpace(s)) continue;
+                list.Add(ConvertSingleValue(s.Trim(), itemType));
+            }
+            return list;
+        }
+        return ConvertSingleValue(rawValue.ToString(), targetType);
+    }
+
+    private static object ConvertSingleValue(string valueString, Type targetType)
+    {
+        if (targetType == typeof(string)) return valueString;
+        if (targetType == typeof(int)) return int.Parse(valueString);
+        if (targetType == typeof(float)) return float.Parse(valueString, CultureInfo.InvariantCulture);
+        if (targetType == typeof(bool)) return valueString.ToLower() == "true" || valueString == "1";
+        if (targetType == typeof(DateTime)) return DateTime.Parse(valueString);
+        if (targetType.IsEnum) return Enum.Parse(targetType, valueString, true);
+        return Convert.ChangeType(valueString, targetType);
+    }
+
+    private static Type GetTypeByName(string name)
+    {
+        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type type = assembly.GetType(name);
+            if (type != null) return type;
+        }
+        return null;
+    }
+
+    private bool IsReferenceToTable(string refValue)
+    {
+        if (string.IsNullOrWhiteSpace(refValue)) return false;
+        if (GetTypeByName(refValue)?.IsEnum == true) return false;
+        string lower = refValue.ToLower();
+        bool isBasicType = lower == "int" || lower == "string" || lower == "float" || lower == "bool" || lower == "datetime";
+        if (isBasicType) return false;
+        return true;
+    }
+
+    private bool ValidateDataTypes(ParsedExcelData data, List<ParsedEnumData> parsedEnums)
+    {
+        var enumNames = new HashSet<string>(parsedEnums.Select(e => e.EnumName));
+        string fileName = Path.GetFileName(data.FilePath);
+
+        for (int i = 0; i < data.DataTypes.Length; i++)
+        {
+            string rawType = data.DataTypes[i];
+            if (string.IsNullOrWhiteSpace(rawType)) continue;
+
+            string baseType = (rawType.EndsWith("s") && rawType.Length > 1 && rawType.ToLower() != "bools") ? rawType.Substring(0, rawType.Length - 1) : rawType;
+
+            if (baseType.Equals("enum", StringComparison.OrdinalIgnoreCase))
+            {
+                LogCritical($"[타입 오류] 파일: '{fileName}', 열: '{data.VariableNames[i]}'. 2행에 'enum'이라고 직접 입력할 수 없습니다. 대신 'BattleEmotion'과 같이 실제 Enum의 이름을 입력해야 합니다.");
+                return false;
+            }
+
+            string lowerBaseType = baseType.ToLower();
+            bool isBasicType = lowerBaseType == "int" || lowerBaseType == "string" || lowerBaseType == "float" || lowerBaseType == "bool" || lowerBaseType == "datetime";
+            bool isDefinedEnum = enumNames.Contains(baseType);
+
+            if (!isBasicType && !isDefinedEnum)
+            {
+                LogCritical($"[타입 오류] 파일: '{fileName}', 열: '{data.VariableNames[i]}'. 2행에 정의된 타입 '{rawType}'은(는) 유효하지 않습니다. 기본 타입(int, string 등) 또는 JSON에 정의된 Enum이 아닙니다.");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private bool ValidateVariableNames(ParsedExcelData data)
+    {
+        string fileName = Path.GetFileName(data.FilePath);
+        var keywords = new HashSet<string> { "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked", "class", "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event", "explicit", "extern", "false", "finally", "fixed", "float", "for", "foreach", "goto", "if", "implicit", "in", "int", "interface", "internal", "is", "lock", "long", "namespace", "new", "null", "object", "operator", "out", "override", "params", "private", "protected", "public", "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc", "static", "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint", "ulong", "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while" };
+
+        for (int i = 0; i < data.VariableNames.Length; i++)
+        {
+            string varName = data.VariableNames[i];
+            if (string.IsNullOrWhiteSpace(varName)) continue;
+
+            if (keywords.Contains(varName))
+            {
+                LogCritical($"[변수명 오류] 파일: '{fileName}', 열: {i + 1}. 변수명 '{varName}'은(는) C# 예약어이므로 사용할 수 없습니다.");
+                return false;
+            }
+
+            if (char.IsDigit(varName[0]))
+            {
+                LogCritical($"[변수명 오류] 파일: '{fileName}', 열: {i + 1}. 변수명 '{varName}'은(는) 숫자로 시작할 수 없습니다.");
+                return false;
+            }
+
+            if (!Regex.IsMatch(varName, @"^[a-zA-Z0-9_]+$"))
+            {
+                LogCritical($"[변수명 오류] 파일: '{fileName}', 열: {i + 1}. 변수명 '{varName}'에 유효하지 않은 문자(공백, 특수문자 등)가 포함되어 있습니다. 영문, 숫자, 밑줄(_)만 사용할 수 있습니다.");
+                return false;
+            }
+        }
+        return true;
+    }
+    #endregion
+}
