@@ -1,0 +1,154 @@
+using UnityEngine;
+
+public abstract class BaseMono : MonoBehaviour
+{
+    /// <summary>
+    /// 모노와 1:1 매칭이 아니라면 ID를 오버라이드해 노출시켜 사용
+    /// </summary>
+    public virtual string GetID =>  this.GetType().Name;
+    public GameManager GetGM => GameManager.Instance;
+
+    public Transform scaleTf;
+}
+
+/// <summary>
+/// 해당 기능으로 플레이 모드에서만 사용 가능한 프리펩을 쓰면
+/// 누군가 씬에 매니저를 박아놔도 원본 프리펩만 사용 가능해
+/// 원본유지 및 오류 에 장점이 있다.
+/// </summary>
+public abstract class ResourcesSingleton<T> : MonoBehaviour where T : ResourcesSingleton<T>
+{
+    private static T _instance;
+    private static readonly object _lock = new object(); // 스레드 안전성을 위한 잠금 객체
+
+    // 싱글톤 프리팹이 저장되는 기본 경로
+    private const string SingletonResourcePath = "Singletons";
+    
+    /// <summary>
+    /// 싱글톤 인스턴스에 접근하기 위한 프로퍼티입니다.
+    /// </summary>
+    public static T Instance
+    {
+        get
+        {
+            // 스레드 동기화 처리
+            lock (_lock)
+            {
+                if (_instance == null)
+                {
+                    // 플레이 모드가 아닐 경우, 인스턴스를 생성하지 않고 경고 후 null 반환
+                    if (!Application.isPlaying)
+                    {
+                        Debug.LogWarning($"[Singleton] {typeof(T).Name}의 인스턴스는 플레이 모드에서만 접근할 수 있습니다.");
+                        return null;
+                    }
+                 
+                    // 1. 리소스 경로 설정 (예: "Singletons/GameManager")
+                    string prefabPath = $"{SingletonResourcePath}/{typeof(T).Name}";
+                    
+                    // 2. Resources 폴더에서 프리팹 로드
+                    var prefab = Resources.Load<T>(prefabPath);
+
+                    if (prefab == null)
+                    {
+                        // 프리팹을 찾지 못한 경우 치명적인 오류 로그 출력
+                        Debug.LogError($"[Singleton] 리소스 폴더에서 프리팹을 찾을 수 없습니다! 경로를 확인해주세요: Resources/{prefabPath}.prefab");
+                        return null;
+                    }
+                    
+                    // 3. 프리팹을 인스턴스화하여 씬에 생성
+                    _instance = Instantiate(prefab);
+                    _instance.name = $"{typeof(T).Name} (Singleton)"; // 하이어라키에서 쉽게 식별하도록 이름 변경
+                    
+                    // 4. 씬이 전환되어도 파괴되지 않도록 설정
+                    DontDestroyOnLoad(_instance.gameObject);
+
+                    // 5. 자식 클래스에서 재정의할 수 있는 초기화 메서드 호출
+                    _instance.OnLoad();
+                    
+                    Debug.Log($"[Singleton] {typeof(T).Name} 인스턴스가 생성되었습니다.");
+                }
+            }
+            return _instance;
+        }
+    }
+
+    /// <summary>
+    /// 인스턴스가 생성된 후 호출되는 가상 초기화 메서드입니다.
+    /// 상속받는 클래스에서 필요에 따라 재정의하여 사용할 수 있습니다.
+    /// </summary>
+    public virtual void OnLoad()
+    {
+        // 자식 클래스에서 초기화 로직 구현
+    }
+
+}
+
+
+public abstract class BaseMono_HasData : BaseMono
+{
+    public BaseDir baseDir;
+    public enum BaseDir
+    {
+        Up,Right
+    }
+    public abstract void SetData(BaseData pData);
+    public abstract BaseData GetData();
+
+    public T GetData<T>() where T : BaseData
+    {
+        return GetData() as T;
+    }
+}
+public abstract class BaseData 
+{
+    //public string dataId;
+
+    public BaseMono_HasData modelInstance;
+    public BaseMono_HasData modelPrefab;
+    
+    public virtual void Init() { }
+    public BaseMono_HasData CreateNewInstacnce(Transform parent,BaseData overrideData)
+    {
+        DestroyModelInstance();
+        modelInstance = GameObject.Instantiate(modelPrefab, parent);
+
+        if (overrideData != null)
+        {
+            modelInstance.SetData(overrideData);
+        }
+        Init();
+
+        if (this is IMonoUpdate updatable)
+        {
+            InGameManager.instance.Register(updatable);
+        }
+        return modelInstance;
+    }
+
+
+    public void DestroyModelInstance()
+    {
+        if(modelInstance != null)
+            GameObject.Destroy(modelInstance);
+        
+        if (this is IMonoUpdate updatable)
+        {
+            InGameManager.instance.Unregister(updatable);
+        }
+    }
+
+    public Vector3 GetModelPos()
+    {
+        if (modelInstance != null)
+            return modelInstance.transform.position;
+        return Vector3.zero;
+    }
+
+    public void SetModelPos(Vector3 pos)
+    {
+        if (modelInstance != null)
+            modelInstance.transform.position = pos;
+    }
+
+}
