@@ -1,0 +1,162 @@
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.UI;
+
+public class ToolTipManager : ResourcesSingleton<ToolTipManager>
+{
+    public Vector2 GetMousePos => GameManager.Instance.input.Player.Point.ReadValue<Vector2>();
+    
+    private PointerEventData pointerEventData;
+    private EventSystem      eventSystem;
+    
+    [Header("Settings")]
+    public float delayToShow = 0.1f; // 툴팁이 나타나기까지의 딜레이 시간
+    private IToolTip currentTarget;  // 현재 마우스가 위에 있는 IToolTip
+    private IToolTip previousTarget; // 이전 프레임의 IToolTip
+    
+    private float hoverTimer;
+    public Vector2 positionOffset = new Vector2(15f, 15f); // 마우스 포인터와의 간격
+
+    public UI_ToolTipBox uiToolTipBoxPrefab;
+    public UI_ToolTipBox uiToolTipBoxInstance;
+    
+    
+    public void OnEnable()
+    {
+        eventSystem = EventSystem.current; // 씬의 EventSystem을 가져옴
+    }
+
+    public void Update()
+    {
+        // UI가 열려있을 때만 Raycast를 수행하도록 하는 것이 성능에 좋습니다.
+        pointerEventData = new PointerEventData(eventSystem)
+        {
+            position = GetMousePos
+        };
+
+        List<RaycastResult> results = new List<RaycastResult>();
+        eventSystem.RaycastAll(pointerEventData, results);
+        // ---- 카메라이도 피직스 레이케스터 달아야함 ----
+
+        currentTarget = null;
+        if (results.Count > 0)
+        {
+            // IToolTip 컴포넌트를 가진 가장 가까운 오브젝트를 찾습니다.
+            foreach (var result in results)
+            {
+                currentTarget = result.gameObject.GetComponent<IToolTip>();
+                if (currentTarget != null)
+                {
+                    break;
+                }
+            }
+        }
+
+        // 타겟이 변경되었는지 확인
+        if (currentTarget != previousTarget)
+        {
+            // 이전 타겟이 있었다면 툴팁을 숨김
+            if (previousTarget != null)
+            {
+                HideTooltip();
+            }
+            // 타이머 리셋
+            hoverTimer = 0f;
+        }
+
+        // 현재 타겟이 유효하다면
+        if (currentTarget != null)
+        {
+            hoverTimer += Time.deltaTime;
+            // 지정된 딜레이 시간 이상 머물렀다면 툴팁 표시
+            if (hoverTimer >= delayToShow)
+            {
+                // 툴팁이 아직 활성화되지 않았다면 활성화
+                if (uiToolTipBoxInstance == null || !uiToolTipBoxInstance.gameObject.activeSelf)
+                {
+                    ShowTooltip(currentTarget);
+                }
+            }
+        }
+        else // 타겟이 없다면
+        {
+            if (uiToolTipBoxInstance != null && uiToolTipBoxInstance.gameObject.activeSelf)
+            {
+                HideTooltip();
+            }
+        }
+
+
+        // 현재 타겟을 이전 타겟으로 기록
+        previousTarget = currentTarget;
+
+        // 툴팁 위치 업데이트 (툴팁이 활성화 되어 있을 때만)
+        if (uiToolTipBoxInstance != null && uiToolTipBoxInstance.gameObject.activeSelf)
+        {
+            UpdateTooltipPosition();
+        }
+    }
+    private void ShowTooltip(IToolTip toolTip)
+    {
+        if (uiToolTipBoxInstance == null)
+        {
+            var lCanvas = UIManager.Instance.GetCanvas;
+            uiToolTipBoxInstance = Instantiate(uiToolTipBoxPrefab, lCanvas.transform);
+            //uiToolTipBoxInstance = GameManager.Instance.uiManager.SingleOpen<UI_ToolTipBox>("UI_ToolTipBox");
+        }
+        uiToolTipBoxInstance.gameObject.SetActive(true);
+        
+        uiToolTipBoxInstance.SetData(toolTip.GetToolTipData());
+
+        LayoutRebuilder.ForceRebuildLayoutImmediate(uiToolTipBoxInstance.GetComponent<RectTransform>());
+        
+        UpdateTooltipPosition();
+    }
+
+    private void HideTooltip()
+    {
+        if (uiToolTipBoxInstance != null)
+        {
+            uiToolTipBoxInstance.gameObject.SetActive(false);
+        }
+    }
+    
+    /// <summary>
+    /// 툴팁의 위치를 마우스 위치와 화면 경계에 따라 조정합니다.
+    /// </summary>
+    private void UpdateTooltipPosition()
+    {
+        if (uiToolTipBoxInstance == null) return;
+
+        Vector2 mousePos = GetMousePos;
+        RectTransform tooltipRect = uiToolTipBoxInstance.GetComponent<RectTransform>();
+        
+        // 캔버스의 스케일 팩터를 고려한 툴팁의 실제 크기
+        float tooltipWidth = tooltipRect.rect.width * tooltipRect.lossyScale.x;
+        float tooltipHeight = tooltipRect.rect.height * tooltipRect.lossyScale.y;
+
+        // 마우스 위치에 따라 피벗을 동적으로 설정
+        // 화면의 오른쪽 절반에 있으면 피벗의 x를 1(오른쪽)로, 왼쪽 절반에 있으면 0(왼쪽)으로 설정
+        float pivotX = mousePos.x / Screen.width > 0.5f ? 1 : 0;
+        // 화면의 위쪽 절반에 있으면 피벗의 y를 1(위쪽)으로, 아래쪽 절반에 있으면 0(아래쪽)으로 설정
+        float pivotY = mousePos.y / Screen.height > 0.5f ? 1 : 0;
+        
+        tooltipRect.pivot = new Vector2(pivotX, pivotY);
+        
+        // 오프셋 적용: 피벗 방향에 따라 오프셋 부호를 변경
+        Vector2 offset = new Vector2(positionOffset.x * (pivotX == 0 ? 1 : -1), positionOffset.y * (pivotY == 0 ? 1 : -1));
+        Vector2 newPos = mousePos + offset;
+
+        // 화면 경계 클램핑
+        // 툴팁이 화면 밖으로 나가지 않도록 위치를 조정
+        float halfWidth = tooltipWidth * tooltipRect.pivot.x;
+        float halfHeight = tooltipHeight * tooltipRect.pivot.y;
+        
+        newPos.x = Mathf.Clamp(newPos.x, halfWidth, Screen.width - (tooltipWidth - halfWidth));
+        newPos.y = Mathf.Clamp(newPos.y, halfHeight, Screen.height - (tooltipHeight - halfHeight));
+
+        tooltipRect.position = newPos;
+    }
+}
